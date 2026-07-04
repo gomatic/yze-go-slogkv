@@ -3,4 +3,4 @@
 [![go](https://github.com/gomatic/yze-go-slogkv/actions/workflows/go.yml/badge.svg)](https://github.com/gomatic/yze-go-slogkv/actions/workflows/go.yml)
 [![release](https://github.com/gomatic/yze-go-slogkv/actions/workflows/release.yml/badge.svg)](https://github.com/gomatic/yze-go-slogkv/actions/workflows/release.yml)
 
-[docs](https://gomatic.github.io/docs.yze-go-slogkv/)
+[docs](https://gomatic.github.io/docs.yze/)
