@@ -46,3 +46,42 @@ func plainCall() {
 	f := func(string) {}
 	f("x")
 }
+
+// funcLitCall calls a function literal directly; the callee is neither a
+// selector nor an identifier and must NOT be flagged.
+func funcLitCall() {
+	func(string) {}("m")
+}
+
+// forward spreads an unknown key/value slice into a leveled call; the spread
+// contents are not statically knowable and must NOT be flagged.
+func forward(msg string, kvs ...any) {
+	slog.Info(msg, kvs...)
+	slog.Default().Warn(msg, kvs...)
+}
+
+// methodExprUsage calls leveled methods as method expressions; the first
+// argument is the receiver, so the message/pair window shifts by one.
+func methodExprUsage(l *slog.Logger) {
+	(*slog.Logger).Info(l, "ok", "k", 1)
+	(*slog.Logger).Info(l, "odd", "k") // want `odd number of key/value arguments`
+}
+
+// attrAlias is an alias of slog.Attr; values of the alias type mark the
+// attribute shape exactly like slog.Attr itself.
+type attrAlias = slog.Attr
+
+func aliasAttr() attrAlias {
+	return slog.Int("n", 1)
+}
+
+func aliasUsage() {
+	slog.Info("attrs", aliasAttr())
+}
+
+// constKey is a named string constant; a constant key is valid.
+const constKey = "ck"
+
+func constKeyUsage() {
+	slog.Info("ok", constKey, 1)
+}

@@ -3,9 +3,14 @@
 // methods on a *slog.Logger) passes its attributes as constant-string key/value
 // pairs — an even number of trailing arguments whose keys are constant strings.
 //
-// Calls that pass any slog.Attr argument are intentionally not checked: mixing
-// pre-built attributes with loose pairs is a valid, harder-to-verify shape, so the
-// analyzer skips it rather than risk a false positive.
+// Calls that pass any slog.Attr argument (or an alias of it) are intentionally
+// not checked: mixing pre-built attributes with loose pairs is a valid,
+// harder-to-verify shape, so the analyzer skips it rather than risk a false
+// positive. Spread calls (slog.Info(msg, kvs...)) are likewise skipped — the
+// spread contents are not statically knowable. Dot-imported calls and method
+// expressions ((*slog.Logger).Info(l, ...)) are checked; method values
+// (f := slog.Info; f(...)) are out of scope, because once the function is bound
+// to a plain variable the call site no longer names a slog entrypoint.
 package slogkv
 
 import (
@@ -66,32 +71,66 @@ func run(pass *analysis.Pass) (any, error) {
 }
 
 // check reports a leveled slog call whose loose key/value pairs are malformed.
+// Spread calls (call.Ellipsis set) are skipped entirely: the spread contents
+// are not statically knowable, so no pairing can be judged.
 func check(pass *analysis.Pass, call *ast.CallExpr) {
-	if !isLeveledSlogCall(pass, call) {
+	if !isLeveledSlogCall(pass, call) || call.Ellipsis.IsValid() {
 		return
 	}
-	args := call.Args[1:]
+	args := call.Args[1+methodExprShift(pass, call):]
 	if hasAttrArg(pass, args) {
 		return
 	}
 	checkPairs(pass, call, args)
 }
 
-// isLeveledSlogCall reports whether call invokes a leveled slog function or method.
+// isLeveledSlogCall reports whether call invokes a leveled slog function or
+// method — qualified (slog.Info), on a logger (l.Info), as a method expression
+// ((*slog.Logger).Info), or dot-imported (a bare Info resolving to log/slog).
 func isLeveledSlogCall(pass *analysis.Pass, call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || !leveledMethods[sel.Sel.Name] {
+	id := calleeIdent(call.Fun)
+	if id == nil || !leveledMethods[id.Name] {
 		return false
 	}
-	fn, ok := pass.TypesInfo.ObjectOf(sel.Sel).(*types.Func)
+	fn, ok := pass.TypesInfo.ObjectOf(id).(*types.Func)
 	return ok && fn.Pkg() != nil && fn.Pkg().Path() == slogPkgPath
 }
 
-// hasAttrArg reports whether any argument is a slog.Attr, marking the attribute
-// shape the analyzer skips.
+// calleeIdent returns the identifier naming the called function: the selected
+// name of a selector callee, a bare identifier callee (dot imports), or nil for
+// any other callee shape.
+func calleeIdent(fun ast.Expr) *ast.Ident {
+	switch f := fun.(type) {
+	case *ast.SelectorExpr:
+		return f.Sel
+	case *ast.Ident:
+		return f
+	default:
+		return nil
+	}
+}
+
+// methodExprShift returns 1 when call invokes a leveled method as a method
+// expression ((*slog.Logger).Info(l, ...)), whose first argument is the
+// receiver, so the message/pair window shifts by one; otherwise 0.
+func methodExprShift(pass *analysis.Pass, call *ast.CallExpr) int {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return 0
+	}
+	selection := pass.TypesInfo.Selections[sel]
+	if selection != nil && selection.Kind() == types.MethodExpr {
+		return 1
+	}
+	return 0
+}
+
+// hasAttrArg reports whether any argument is a slog.Attr (or an alias of it),
+// marking the attribute shape the analyzer skips.
 func hasAttrArg(pass *analysis.Pass, args []ast.Expr) bool {
 	for _, arg := range args {
-		if named, ok := pass.TypesInfo.TypeOf(arg).(*types.Named); ok && namedPath(named) == slogAttrType {
+		named, ok := types.Unalias(pass.TypesInfo.TypeOf(arg)).(*types.Named)
+		if ok && namedPath(named) == slogAttrType {
 			return true
 		}
 	}
