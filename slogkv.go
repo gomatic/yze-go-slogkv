@@ -1,29 +1,43 @@
 // Package slogkv provides a go/analysis analyzer enforcing the gomatic structured-
-// logging standard: a leveled slog call passes its attributes as constant-string
-// key/value pairs — every key position holds a constant of string type, and every
-// key has a value.
+// logging standard: a slog key is written as a constant string, and every key has
+// a value.
 //
-// The leveled entrypoints are slog.Debug/Info/Warn/Error, their Context variants
-// (slog.DebugContext and the rest), and slog.Log, plus the same methods on a
-// *slog.Logger. They differ only in how many arguments precede the loose pairs —
-// one for the plain forms, two for the Context forms, three for Log — which the
-// analyzer accounts for, so none of them is out of scope. slog.LogAttrs is: its
-// trailing arguments are all slog.Attr, so it has no loose pairs to judge.
+// The entrypoints carrying loose key/value pairs are slog.Debug/Info/Warn/Error,
+// their Context variants (slog.DebugContext and the rest), slog.Log and
+// slog.Group, plus the same methods on a *slog.Logger. They differ only in how
+// many arguments precede the loose pairs — one for the plain forms and for Group,
+// two for the Context forms, three for Log — which the analyzer accounts for, so
+// none of them is out of scope. slog.LogAttrs is: its trailing arguments are all
+// slog.Attr, so it has no loose pairs to judge.
 //
-// A slog.Attr argument (or an alias of it) is consumed on its own, exactly as
-// log/slog consumes it: it is stepped over and the loose pairs around it are
-// still checked. An Attr therefore cannot silence the call it appears in.
+// The Attr constructors — slog.String, Int, Int64, Uint64, Float64, Bool, Time,
+// Duration, Any and Group — take their key as a declared parameter rather than as
+// a loose pair, and that key is held to the same rule. Otherwise slog.Any(k, v) is
+// a free way to write exactly the dynamic key the rule exists to forbid, emitting
+// a byte-identical record.
+//
+// A slog.Attr argument is consumed on its own, exactly as log/slog consumes it: it
+// is stepped over and the loose pairs around it are still checked. An Attr
+// therefore cannot silence the call it appears in.
 //
 // A key must be a constant whose type is string or an alias of string. A constant
 // of a NAMED string type is reported: log/slog's own conversion matches the string
 // type exactly, so a defined type falls through to !BADKEY at runtime.
 //
-// Spread calls (slog.Info(msg, kvs...)) are skipped — the spread contents are not
-// statically knowable. Dot-imported calls and method expressions
-// ((*slog.Logger).Info(l, ...)) are checked, and so is a parenthesised callee
-// ((slog.Info)(...)), which names the same entrypoint. Method values
-// (f := slog.Info; f(...)) are out of scope, because once the function is bound to
-// a plain variable the call site no longer names a slog entrypoint.
+// Three shapes are not statically knowable and are skipped for that one reason. A
+// spread call (slog.Info(msg, kvs...)) hides its arguments. The f(g()) multi-value
+// form has a single syntactic argument standing for every parameter, so no
+// argument position names a key. And an argument whose static type is an empty
+// interface may hold a key, a value or an Attr — log/slog dispatches on the
+// dynamic type — so nothing after it can be judged, and the walk stops there;
+// keys before it are still reported.
+//
+// Dot-imported calls and method expressions ((*slog.Logger).Info(l, ...)) are
+// checked, and so is a parenthesised callee ((slog.Info)(...)), which names the
+// same entrypoint. Method values (f := slog.Info; f(...)) are out of scope,
+// because once the function is bound to a plain variable the call site no longer
+// names a slog entrypoint. (*slog.Logger).With and (*slog.Record).Add carry loose
+// pairs too and are not yet checked — slogkv.with-and-add-carry-loose-pairs.
 package slogkv
 
 import (
@@ -41,19 +55,20 @@ const (
 	messageKeyConst = "slog key must be a constant string"
 )
 
-// slogPkgPath is the import path whose leveled functions/methods this analyzer checks.
+// slogPkgPath is the import path whose functions/methods this analyzer checks.
 const slogPkgPath = "log/slog"
 
 // slogAttrType is the fully-qualified slog.Attr type, which log/slog consumes as a
 // whole attribute rather than as a key or a value.
 const slogAttrType = "log/slog.Attr"
 
-// leadingArgs maps each leveled log/slog entrypoint to the number of arguments
-// that precede its loose key/value pairs: the message alone for the plain forms,
-// a context before it for the Context forms, and a context and a level for Log.
-// LogAttrs is absent on purpose — its trailing arguments are all slog.Attr, so it
-// has no loose pairs.
-var leadingArgs = map[string]int{
+// entrypoint is the name a call site uses for a log/slog function or method.
+type entrypoint string
+
+// leadingArgs maps each log/slog entrypoint whose trailing arguments are loose
+// key/value pairs to the number of arguments preceding them. LogAttrs is absent on
+// purpose — its trailing arguments are all slog.Attr, so it has no loose pairs.
+var leadingArgs = map[entrypoint]int{
 	"Debug":        1,
 	"Info":         1,
 	"Warn":         1,
@@ -63,12 +78,31 @@ var leadingArgs = map[string]int{
 	"WarnContext":  2,
 	"ErrorContext": 2,
 	"Log":          3,
+	"Group":        1,
 }
 
-// Analyzer reports malformed key/value arguments to leveled slog calls.
+// attrKeyFuncs are the log/slog Attr constructor FUNCTIONS whose first argument is
+// the attribute's key. Every one of these names is also a zero-argument method on
+// slog.Value — v.String(), v.Group(), v.Any() and the rest — so a name alone does
+// not identify a constructor, and the receiver test in checkAttrKey is what keeps
+// them apart.
+var attrKeyFuncs = map[entrypoint]bool{
+	"String":   true,
+	"Int":      true,
+	"Int64":    true,
+	"Uint64":   true,
+	"Float64":  true,
+	"Bool":     true,
+	"Time":     true,
+	"Duration": true,
+	"Any":      true,
+	"Group":    true,
+}
+
+// Analyzer reports malformed key/value arguments to slog calls.
 var Analyzer = &analysis.Analyzer{
 	Name:     "slogkv",
-	Doc:      "reports leveled slog calls whose key/value arguments are unpaired or use a non-constant key",
+	Doc:      "reports slog calls whose key/value arguments are unpaired or use a non-constant key",
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 	Run:      run,
 }
@@ -83,7 +117,7 @@ var Registration = goyze.Registration{
 	Analyzer:   Analyzer,
 }
 
-// run checks every leveled slog call in the analyzed package.
+// run checks every slog call in the analyzed package.
 func run(pass *analysis.Pass) (any, error) {
 	insp := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
 	insp.Preorder([]ast.Node{(*ast.CallExpr)(nil)}, func(n ast.Node) {
@@ -92,40 +126,71 @@ func run(pass *analysis.Pass) (any, error) {
 	return nil, nil
 }
 
-// check reports a leveled slog call whose loose key/value pairs are malformed.
-// Spread calls (call.Ellipsis set) are skipped entirely: the spread contents
-// are not statically knowable, so no pairing can be judged.
+// check reports a slog call whose keys are malformed, in either place a key is
+// written: an Attr constructor's declared key parameter, and the loose pairs of a
+// leveled entrypoint.
 func check(pass *analysis.Pass, call *ast.CallExpr) {
-	leading, ok := leveledPrefix(pass, call)
-	if !ok || call.Ellipsis.IsValid() {
+	fn, ok := slogFunc(pass, calleeIdent(call.Fun))
+	if !ok || isMultiValueCall(pass, call) {
+		return
+	}
+	checkAttrKey(pass, fn, call)
+	checkLoosePairs(pass, fn, call)
+}
+
+// slogFunc returns the log/slog function or method id resolves to. A nil id — the
+// callee shape calleeIdent refuses — resolves to no object and falls out of the
+// type assertion, so it needs no guard of its own; adding one is dead code no case
+// can kill, which was measured rather than assumed.
+//
+// The nil-PACKAGE guard is the load-bearing one: "Error" is one of the names below
+// and the universe error interface's Error method is a *types.Func with no package
+// at all, so without it the analyzer dereferences nil on err.Error().
+func slogFunc(pass *analysis.Pass, id *ast.Ident) (*types.Func, bool) {
+	fn, ok := pass.TypesInfo.ObjectOf(id).(*types.Func)
+	return fn, ok && fn.Pkg() != nil && fn.Pkg().Path() == slogPkgPath
+}
+
+// isMultiValueCall reports whether call is the f(g()) form, whose single syntactic
+// argument carries every parameter, so no argument position names a key. Go allows
+// it wherever the arities match, which includes every entrypoint here.
+func isMultiValueCall(pass *analysis.Pass, call *ast.CallExpr) bool {
+	if len(call.Args) != 1 {
+		return false
+	}
+	_, tuple := pass.TypesInfo.TypeOf(call.Args[0]).(*types.Tuple)
+	return tuple
+}
+
+// checkAttrKey reports a non-constant key handed to an Attr constructor. The key
+// is a declared parameter rather than a loose pair, and it is a slog key all the
+// same. The receiver test is not cosmetic: slog.Value carries a zero-argument
+// method for every constructor name, so keying on the name alone reads v.Group()
+// as a constructor call and indexes an empty argument list.
+func checkAttrKey(pass *analysis.Pass, fn *types.Func, call *ast.CallExpr) {
+	if fn.Signature().Recv() != nil || !attrKeyFuncs[entrypoint(fn.Name())] {
+		return
+	}
+	checkKey(pass, call.Args[0])
+}
+
+// checkLoosePairs walks the trailing key/value pairs of an entrypoint that has
+// them, past however many arguments precede them.
+//
+// The length guard earns its place twice over: slog.Value.Group() is a real
+// zero-argument call whose name is in the map, and the f(g()) form packs every
+// parameter into one syntactic argument. Both index past the end without it, and
+// both were found by running the analyzer over the fleet rather than by reading.
+func checkLoosePairs(pass *analysis.Pass, fn *types.Func, call *ast.CallExpr) {
+	leading, ok := leadingArgs[entrypoint(fn.Name())]
+	if !ok {
+		return
+	}
+	leading += methodExprShift(pass, call)
+	if call.Ellipsis.IsValid() || len(call.Args) <= leading {
 		return
 	}
 	checkPairs(pass, call, call.Args[leading:])
-}
-
-// leveledPrefix reports whether call invokes a leveled slog function or method —
-// qualified (slog.Info), on a logger (l.Info), as a method expression
-// ((*slog.Logger).Info), dot-imported (a bare Info resolving to log/slog), or any
-// of those parenthesised — and returns how many of its arguments precede the
-// loose key/value pairs.
-func leveledPrefix(pass *analysis.Pass, call *ast.CallExpr) (int, bool) {
-	id := calleeIdent(call.Fun)
-	if id == nil {
-		return 0, false
-	}
-	leading, ok := leadingArgs[id.Name]
-	if !ok || !isSlogFunc(pass, id) {
-		return 0, false
-	}
-	return leading + methodExprShift(pass, call), true
-}
-
-// isSlogFunc reports whether id resolves to a function declared in log/slog. The
-// nil-package guard is load-bearing: "Error" is a leveled name and the universe
-// error interface's Error method is a *types.Func with no package at all.
-func isSlogFunc(pass *analysis.Pass, id *ast.Ident) bool {
-	fn, ok := pass.TypesInfo.ObjectOf(id).(*types.Func)
-	return ok && fn.Pkg() != nil && fn.Pkg().Path() == slogPkgPath
 }
 
 // calleeIdent returns the identifier naming the called function: the selected
@@ -165,11 +230,24 @@ func isAttrArg(pass *analysis.Pass, arg ast.Expr) bool {
 	return ok && namedPath(named) == slogAttrType
 }
 
+// isUnknownArg reports whether arg's static type leaves its role unknowable: an
+// empty interface may hold a key, a value or a slog.Attr, and log/slog dispatches
+// on the dynamic type. An interface a string is unassignable to — error is the
+// common one — stays knowable: it is no constant string, so it is a bad key.
+func isUnknownArg(pass *analysis.Pass, arg ast.Expr) bool {
+	argType := pass.TypesInfo.TypeOf(arg)
+	return types.IsInterface(argType) && types.AssignableTo(types.Typ[types.String], argType)
+}
+
 // checkPairs walks the loose arguments the way log/slog does — an Attr stands
 // alone, anything else is a key expecting a value — reporting the first key with
-// no value, and every key that is not a constant string.
+// no value, and every key that is not a constant string. It stops at the first
+// argument whose role is unknowable, because nothing past it can be judged.
 func checkPairs(pass *analysis.Pass, call *ast.CallExpr, args []ast.Expr) {
 	for len(args) > 0 {
+		if isUnknownArg(pass, args[0]) {
+			return
+		}
 		if isAttrArg(pass, args[0]) {
 			args = args[1:]
 			continue
