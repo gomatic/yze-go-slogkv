@@ -11,7 +11,9 @@ func usage(err error) {
 	slog.Warn("bad", nonConstKey, 1) // want `key must be a constant string`
 	slog.Error("attrs", slog.Int("n", 1))
 	slog.Debug("none")
-	slog.Info("intkey", 123, 1) // want `key must be a constant string`
+	// 123 is a bad key and consumes ITSELF, so the 1 after it stands in key
+	// position too: log/slog emits !BADKEY=123 !BADKEY=1, two bad keys.
+	slog.Info("intkey", 123, 1) // want `key must be a constant string` `key must be a constant string`
 	slog.Info("witherr", "k", err)
 }
 

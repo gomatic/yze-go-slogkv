@@ -15,9 +15,11 @@ func levelUsage() {
 	slog.Error("error-key", nonConstKey, 1) // want `key must be a constant string`
 }
 
-// oddNonConstKey is odd AND carries a non-constant key in position 0. The
-// odd-pairs report is the only one, because the key positions of an unpairable
-// call are not knowable; removing the return after that report fails here.
+// oddNonConstKey is odd AND its one loose argument is the package's non-constant
+// key. The odd-pairs report is still the only one, and the reason is the runtime's
+// rather than the analyzer's: log/slog files a trailing lone string under !BADKEY
+// as a VALUE, so nonConstKey never reaches key position and reporting it as a key
+// would be false. Reporting the key as well fails here.
 func oddNonConstKey() {
 	slog.Info("odd-nonconst", nonConstKey) // want `odd number of key/value arguments`
 }

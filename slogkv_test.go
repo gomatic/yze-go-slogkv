@@ -73,9 +73,11 @@ func TestDiagnosticsCarryTheContractedMessageAndPosition(t *testing.T) {
 }
 
 // callAndArgumentPositions parses the fixture package independently of the
-// analyzer and returns the set of call positions and the set of call-argument
-// positions, so the assertions above compare against the source rather than
-// against a recorded run.
+// analyzer and returns the set of call positions and the set of positions a key
+// may be WRITTEN at, so the assertions above compare against the source rather
+// than against a recorded run. A key is written in three places — a loose
+// argument, a constructor's argument, and a composite literal's field — and all
+// three are collected here because all three are held to the same rule.
 func callAndArgumentPositions(t *testing.T, dir string) (map[string]bool, map[string]bool) {
 	t.Helper()
 	sources, err := filepath.Glob(filepath.Join(dir, "*.go"))
@@ -83,23 +85,46 @@ func callAndArgumentPositions(t *testing.T, dir string) (map[string]bool, map[st
 	require.NotEmpty(t, sources)
 
 	fset := token.NewFileSet()
-	calls, args := map[string]bool{}, map[string]bool{}
+	calls, keys := map[string]bool{}, map[string]bool{}
 	for _, source := range sources {
 		file, err := parser.ParseFile(fset, source, nil, 0)
 		require.NoError(t, err)
 		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			calls[shortPosition(fset.Position(call.Pos()))] = true
-			for _, arg := range call.Args {
-				args[shortPosition(fset.Position(arg.Pos()))] = true
-			}
+			collectCallPositions(fset, n, calls, keys)
+			collectLiteralPositions(fset, n, keys)
 			return true
 		})
 	}
-	return calls, args
+	return calls, keys
+}
+
+// collectCallPositions records a call's own position and the position of each of
+// its arguments.
+func collectCallPositions(fset *token.FileSet, n ast.Node, calls, keys map[string]bool) {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return
+	}
+	calls[shortPosition(fset.Position(call.Pos()))] = true
+	for _, arg := range call.Args {
+		keys[shortPosition(fset.Position(arg.Pos()))] = true
+	}
+}
+
+// collectLiteralPositions records the position of each composite-literal element,
+// which for a `Field: value` element is the position of the value, because that is
+// where the field's expression is written.
+func collectLiteralPositions(fset *token.FileSet, n ast.Node, keys map[string]bool) {
+	lit, ok := n.(*ast.CompositeLit)
+	if !ok {
+		return
+	}
+	for _, element := range lit.Elts {
+		if field, keyed := element.(*ast.KeyValueExpr); keyed {
+			element = field.Value
+		}
+		keys[shortPosition(fset.Position(element.Pos()))] = true
+	}
 }
 
 // shortPosition renders a position as "file:line:column" with the directory

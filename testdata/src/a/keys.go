@@ -14,11 +14,11 @@ type aliasString = string
 const aliasKey aliasString = "ak"
 
 func keyUsage(err error) {
-	slog.Info("named-key", namedKey, 1) // want `key must be a constant string`
+	slog.Info("named-key", namedKey, 1) // want `key must be a constant string` `key must be a constant string`
 	slog.Info("alias-key", aliasKey, 1)
 	// A universe named type in KEY position: error has no package at all, which
 	// is the branch namedPath guards against.
-	slog.Info("universe-key", err, 1) // want `key must be a constant string`
+	slog.Info("universe-key", err, 1) // want `key must be a constant string` `key must be a constant string`
 }
 
 // universeErrorUsage calls Error on the universe error interface, whose method is

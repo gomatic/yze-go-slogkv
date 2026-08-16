@@ -10,27 +10,64 @@
 // none of them is out of scope. slog.LogAttrs is: its trailing arguments are all
 // slog.Attr, so it has no loose pairs to judge.
 //
-// The Attr constructors — slog.String, Int, Int64, Uint64, Float64, Bool, Time,
-// Duration, Any and Group — take their key as a declared parameter rather than as
-// a loose pair, and that key is held to the same rule. Otherwise slog.Any(k, v) is
-// a free way to write exactly the dynamic key the rule exists to forbid, emitting
-// a byte-identical record.
+// # The walk is log/slog's own, branch for branch
 //
-// A slog.Attr argument is consumed on its own, exactly as log/slog consumes it: it
-// is stepped over and the loose pairs around it are still checked. An Attr
-// therefore cannot silence the call it appears in.
+// argsToAttr ($GOROOT/src/log/slog/record.go) has THREE branches and the analyzer
+// has the same three. A string is a key and takes the NEXT argument as its value,
+// so it consumes two — and a string with nothing after it is not a key at all, but
+// a value filed under !BADKEY, which is the unpairable call. A slog.Attr is a whole
+// attribute and consumes ONE, so an Attr can never silence the pairs around it.
+// ANYTHING ELSE is a bad key: log/slog gives it !BADKEY and consumes ONE, not two.
+// Consuming two there desynchronises every later position from the record the
+// program actually emits, which is how a value gets reported as a key and a fully
+// paired call gets reported as unpairable.
+//
+// The walk does not stop at a bad key, and reports every later key position too.
+// Because the consumption matches, those positions are the ones log/slog itself
+// keys on — slog.Info("m", 1, 2) really does emit two !BADKEY entries — so each
+// report names a real key and not a consequence of an earlier one. go vet stops
+// there ("so we report at most one missing key per call"); stopping would be a
+// fourth rule this walk does not have, and it hides the dynamic keys after it.
+//
+// # Where a key is written
+//
+// A key is written in three spellings and all three are held to the same rule,
+// because the record log/slog emits is identical for all three: a loose pair, an
+// Attr constructor's key argument (slog.Any(k, v)), and an Attr composite literal's
+// Key field (slog.Attr{k, slog.AnyValue(v)}, one token shorter than the
+// constructor). Leaving any of them out makes the other two free to evade.
+//
+// The constructor and literal spellings are judged WHERE THEY ARE WRITTEN — in the
+// argument list of a slog call. An Attr arriving any other way carries a key its
+// own call site did not write: a forwarder (func Int(key string, value int) Attr {
+// return Int64(key, int64(value)) }) and a ReplaceAttr hook rebuilding an attribute
+// (slog.String(a.Key, ...)) both name a key that belongs to their CALLER, and no
+// remedy exists at the forwarder for a key the caller chose. log/slog's own source
+// is built of both shapes. The cost of this scope is stated rather than hidden: an
+// Attr built into a variable or returned by a helper is not judged, so the rule is
+// evaded by a function — which is a function more than the composite literal used
+// to cost.
+//
+// # What cannot be judged, and what can
 //
 // A key must be a constant whose type is string or an alias of string. A constant
-// of a NAMED string type is reported: log/slog's own conversion matches the string
+// of a NAMED string type is a bad key: log/slog's conversion matches the string
 // type exactly, so a defined type falls through to !BADKEY at runtime.
 //
-// Three shapes are not statically knowable and are skipped for that one reason. A
-// spread call (slog.Info(msg, kvs...)) hides its arguments. The f(g()) multi-value
-// form has a single syntactic argument standing for every parameter, so no
-// argument position names a key. And an argument whose static type is an empty
-// interface may hold a key, a value or an Attr — log/slog dispatches on the
-// dynamic type — so nothing after it can be judged, and the walk stops there;
-// keys before it are still reported.
+// A spread call (slog.Info(msg, kvs...)) hides its arguments, and the f(g())
+// multi-value form has a single syntactic argument standing for every parameter, so
+// neither names a key position at all.
+//
+// An argument whose static type admits the dynamic type string — an empty
+// interface, a type parameter — could take any of the three branches, so the
+// positions after it are not known. They are RECOVERED rather than abandoned: an
+// argument that cannot be a string consumes exactly one whichever branch it takes,
+// so the argument after it stands in key position again however the unknowable one
+// was consumed, and every key from there on is judged. A conversion is stepped
+// through first: any(x) boxes x unchanged and dispatches on x's type, so wrapping an
+// argument in any(...) does not make its role unknowable. What remains unknowable is
+// a value that reached an interface variable elsewhere, which needs dataflow to
+// resolve and is out of scope.
 //
 // Dot-imported calls and method expressions ((*slog.Logger).Info(l, ...)) are
 // checked, and so is a parenthesised callee ((slog.Info)(...)), which names the
@@ -62,6 +99,10 @@ const slogPkgPath = "log/slog"
 // whole attribute rather than as a key or a value.
 const slogAttrType = "log/slog.Attr"
 
+// attrKeyField is the name of the slog.Attr field holding the attribute's key, and
+// the field a composite literal writes first when it writes no field names.
+const attrKeyField = "Key"
+
 // entrypoint is the name a call site uses for a log/slog function or method.
 type entrypoint string
 
@@ -79,24 +120,6 @@ var leadingArgs = map[entrypoint]int{
 	"ErrorContext": 2,
 	"Log":          3,
 	"Group":        1,
-}
-
-// attrKeyFuncs are the log/slog Attr constructor FUNCTIONS whose first argument is
-// the attribute's key. Every one of these names is also a zero-argument method on
-// slog.Value — v.String(), v.Group(), v.Any() and the rest — so a name alone does
-// not identify a constructor, and the receiver test in checkAttrKey is what keeps
-// them apart.
-var attrKeyFuncs = map[entrypoint]bool{
-	"String":   true,
-	"Int":      true,
-	"Int64":    true,
-	"Uint64":   true,
-	"Float64":  true,
-	"Bool":     true,
-	"Time":     true,
-	"Duration": true,
-	"Any":      true,
-	"Group":    true,
 }
 
 // Analyzer reports malformed key/value arguments to slog calls.
@@ -126,15 +149,14 @@ func run(pass *analysis.Pass) (any, error) {
 	return nil, nil
 }
 
-// check reports a slog call whose keys are malformed, in either place a key is
-// written: an Attr constructor's declared key parameter, and the loose pairs of a
-// leveled entrypoint.
+// check judges the loose key/value pairs of a leveled slog entrypoint. The keys
+// written as Attr constructors and literals inside those pairs are judged there,
+// by the walk, rather than wherever an Attr happens to be built.
 func check(pass *analysis.Pass, call *ast.CallExpr) {
 	fn, ok := slogFunc(pass, calleeIdent(call.Fun))
-	if !ok || isMultiValueCall(pass, call) {
+	if !ok {
 		return
 	}
-	checkAttrKey(pass, fn, call)
 	checkLoosePairs(pass, fn, call)
 }
 
@@ -143,9 +165,9 @@ func check(pass *analysis.Pass, call *ast.CallExpr) {
 // type assertion, so it needs no guard of its own; adding one is dead code no case
 // can kill, which was measured rather than assumed.
 //
-// The nil-PACKAGE guard is the load-bearing one: "Error" is one of the names below
-// and the universe error interface's Error method is a *types.Func with no package
-// at all, so without it the analyzer dereferences nil on err.Error().
+// The nil-PACKAGE guard is the load-bearing one: "Error" is one of the entrypoint
+// names and the universe error interface's Error method is a *types.Func with no
+// package at all, so without it the analyzer dereferences nil on err.Error().
 func slogFunc(pass *analysis.Pass, id *ast.Ident) (*types.Func, bool) {
 	fn, ok := pass.TypesInfo.ObjectOf(id).(*types.Func)
 	return fn, ok && fn.Pkg() != nil && fn.Pkg().Path() == slogPkgPath
@@ -160,18 +182,6 @@ func isMultiValueCall(pass *analysis.Pass, call *ast.CallExpr) bool {
 	}
 	_, tuple := pass.TypesInfo.TypeOf(call.Args[0]).(*types.Tuple)
 	return tuple
-}
-
-// checkAttrKey reports a non-constant key handed to an Attr constructor. The key
-// is a declared parameter rather than a loose pair, and it is a slog key all the
-// same. The receiver test is not cosmetic: slog.Value carries a zero-argument
-// method for every constructor name, so keying on the name alone reads v.Group()
-// as a constructor call and indexes an empty argument list.
-func checkAttrKey(pass *analysis.Pass, fn *types.Func, call *ast.CallExpr) {
-	if fn.Signature().Recv() != nil || !attrKeyFuncs[entrypoint(fn.Name())] {
-		return
-	}
-	checkKey(pass, call.Args[0])
 }
 
 // checkLoosePairs walks the trailing key/value pairs of an entrypoint that has
@@ -221,69 +231,4 @@ func methodExprShift(pass *analysis.Pass, call *ast.CallExpr) int {
 		return 1
 	}
 	return 0
-}
-
-// isAttrArg reports whether arg is a slog.Attr (or an alias of it), which
-// log/slog consumes as a whole attribute rather than as a key or a value.
-func isAttrArg(pass *analysis.Pass, arg ast.Expr) bool {
-	named, ok := types.Unalias(pass.TypesInfo.TypeOf(arg)).(*types.Named)
-	return ok && namedPath(named) == slogAttrType
-}
-
-// isUnknownArg reports whether arg's static type leaves its role unknowable: an
-// empty interface may hold a key, a value or a slog.Attr, and log/slog dispatches
-// on the dynamic type. An interface a string is unassignable to — error is the
-// common one — stays knowable: it is no constant string, so it is a bad key.
-func isUnknownArg(pass *analysis.Pass, arg ast.Expr) bool {
-	argType := pass.TypesInfo.TypeOf(arg)
-	return types.IsInterface(argType) && types.AssignableTo(types.Typ[types.String], argType)
-}
-
-// checkPairs walks the loose arguments the way log/slog does — an Attr stands
-// alone, anything else is a key expecting a value — reporting the first key with
-// no value, and every key that is not a constant string. It stops at the first
-// argument whose role is unknowable, because nothing past it can be judged.
-func checkPairs(pass *analysis.Pass, call *ast.CallExpr, args []ast.Expr) {
-	for len(args) > 0 {
-		if isUnknownArg(pass, args[0]) {
-			return
-		}
-		if isAttrArg(pass, args[0]) {
-			args = args[1:]
-			continue
-		}
-		if len(args) == 1 {
-			pass.Reportf(call.Pos(), messageOddPairs)
-			return
-		}
-		checkKey(pass, args[0])
-		args = args[2:]
-	}
-}
-
-// checkKey reports a key position that is not a constant string.
-func checkKey(pass *analysis.Pass, key ast.Expr) {
-	if !isConstString(pass, key) {
-		pass.Reportf(key.Pos(), messageKeyConst)
-	}
-}
-
-// isConstString reports whether arg is a constant of string type. An alias of
-// string is string; a NAMED string type is not, and log/slog rejects it.
-func isConstString(pass *analysis.Pass, arg ast.Expr) bool {
-	tv := pass.TypesInfo.Types[arg]
-	if tv.Value == nil {
-		return false
-	}
-	basic, ok := types.Unalias(tv.Type).(*types.Basic)
-	return ok && basic.Info()&types.IsString != 0
-}
-
-// namedPath returns the fully-qualified "pkgpath.Name" of a named type, or "" when
-// it has no package (a universe type).
-func namedPath(named *types.Named) string {
-	if named.Obj().Pkg() == nil {
-		return ""
-	}
-	return named.Obj().Pkg().Path() + "." + named.Obj().Name()
 }
