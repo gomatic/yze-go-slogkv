@@ -17,7 +17,25 @@ func attrLiteralUsage() {
 	// five-character escape from the rule.
 	slog.Info("lit-parenthesised", (slog.Attr{nonConstKey, slog.IntValue(1)})) // want `key must be a constant string`
 	slog.Info("ctor-parenthesised", (slog.Any(nonConstKey, 1)))                // want `key must be a constant string`
+	// Every spelling below NAMES the literal beside it rather than deriving
+	// something from it, so each is a place the key is still written here. *& is
+	// two characters, which is cheaper than the parentheses above.
+	slog.Info("lit-deref-address", *&slog.Attr{nonConstKey, slog.IntValue(1)})               // want `key must be a constant string`
+	slog.Info("lit-asserted", any(slog.Attr{nonConstKey, slog.IntValue(1)}).(slog.Attr))     // want `key must be a constant string`
+	slog.Info("ctor-converted", slog.Attr(slog.Any(nonConstKey, 1)))                         // want `key must be a constant string`
+	slog.Info("lit-converted-deref", *&[]slog.Attr{{nonConstKey, slog.IntValue(1)}}[0])
+	// A channel receive is an Attr and names no literal, so peeling it lands on an
+	// identifier and reports nothing — which is what makes the peel safe to write
+	// as a peel rather than as a list of exact shapes.
+	slog.Info("lit-received", <-attrChan)
+	// Each wrapper is peeled through the next, so a wrapper of a wrapper is not a
+	// spelling the rule stops at.
+	slog.Info("lit-paren-deref", (*&slog.Attr{nonConstKey, slog.IntValue(1)}))              // want `key must be a constant string`
+	slog.Info("ctor-converted-deref", slog.Attr(*&slog.Attr{nonConstKey, slog.IntValue(1)})) // want `key must be a constant string`
 }
+
+// attrChan carries Attrs built somewhere else entirely.
+var attrChan chan slog.Attr
 
 // attrFromHelper is the FORWARDER shape: its key is a parameter, so the key this
 // call names was chosen by whoever called attrFromHelper and there is no remedy

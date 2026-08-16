@@ -21,6 +21,15 @@ func attrKeyUsage() {
 	slog.Info("string-key", slog.String(nonConstKey, "v")) // want `key must be a constant string`
 }
 
+// groupAttrsUsage is Group with an Attr-only tail, five characters away and until
+// now not in the entrypoint map at all — so every key written inside it escaped
+// while emitting the record the reported Group spelling emits.
+func groupAttrsUsage() {
+	slog.Info("ga-ok", slog.GroupAttrs("g", slog.Int("n", 1)))
+	slog.Info("ga-inner", slog.GroupAttrs("g", slog.String(nonConstKey, "v"))) // want `key must be a constant string`
+	slog.Info("ga-own-key", slog.GroupAttrs(nonConstKey, slog.Int("n", 1)))    // want `key must be a constant string`
+}
+
 // valueMethodUsage calls the zero-argument slog.Value methods that share every
 // Attr constructor's name. They are methods, not constructors, and they have no
 // key argument to index.

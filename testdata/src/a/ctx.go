@@ -19,15 +19,19 @@ func contextUsage(ctx context.Context, l *slog.Logger) {
 	(*slog.Logger).Log(l, ctx, slog.LevelInfo, "log-expr-odd", "k") // want `odd number of key/value arguments`
 }
 
-// logAttrsUsage is the documented scope limitation, sitting beside the in-scope
-// siblings above so its silence is not mistaken for the analyzer being broken.
+// logAttrsUsage carries no loose pairs — every trailing argument is a slog.Attr —
+// and its keys are judged all the same, because an Attr WRITTEN in an argument
+// list is written there whatever entrypoint the list belongs to. While LogAttrs
+// was excluded these three lines were silent and emitted the same record as the
+// reported Info spelling, which is the whole of the rule going free at the
+// allocation-free entrypoint slog's own documentation recommends.
 //
-// It does NOT pin the exclusion, and saying otherwise would be the test that
-// blesses a limitation: adding "LogAttrs": 3 to leadingArgs leaves the whole suite
-// green, because LogAttrs' trailing arguments are all slog.Attr and the walk
-// consumes every one of them either way. The exclusion is unobservable by any case
-// this corpus can hold, which is a finding about the clause rather than a gap in
-// the case — slogkv.logattrs-exclusion-is-unobservable.
-func logAttrsUsage(ctx context.Context, l *slog.Logger) {
+// The constant-key line beside them is the other side of the boundary, and the
+// spread is out of scope for the reason every spread is.
+func logAttrsUsage(ctx context.Context, l *slog.Logger, attrs []slog.Attr) {
 	l.LogAttrs(ctx, slog.LevelInfo, "logattrs", slog.Int("n", 1))
+	l.LogAttrs(ctx, slog.LevelInfo, "logattrs-key", slog.String(nonConstKey, "v"))       // want `key must be a constant string`
+	slog.LogAttrs(ctx, slog.LevelInfo, "logattrs-fn", slog.Any(nonConstKey, 1))          // want `key must be a constant string`
+	slog.LogAttrs(ctx, slog.LevelInfo, "logattrs-lit", slog.Attr{nonConstKey, slog.IntValue(1)}) // want `key must be a constant string`
+	l.LogAttrs(ctx, slog.LevelInfo, "logattrs-spread", attrs...)
 }

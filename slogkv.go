@@ -6,9 +6,13 @@
 // their Context variants (slog.DebugContext and the rest), slog.Log and
 // slog.Group, plus the same methods on a *slog.Logger. They differ only in how
 // many arguments precede the loose pairs — one for the plain forms and for Group,
-// two for the Context forms, three for Log — which the analyzer accounts for, so
-// none of them is out of scope. slog.LogAttrs is: its trailing arguments are all
-// slog.Attr, so it has no loose pairs to judge.
+// two for the Context forms, three for Log — which the analyzer accounts for.
+//
+// slog.LogAttrs and slog.GroupAttrs carry no loose pairs at all: every trailing
+// argument is a slog.Attr. They are walked anyway, because an Attr written in an
+// argument list has its key judged there (below), and while they were excluded
+// every key written inside them escaped the rule while emitting the same record as
+// the Info spelling that is reported.
 //
 // # The walk is log/slog's own, branch for branch
 //
@@ -106,9 +110,11 @@ const attrKeyField = "Key"
 // entrypoint is the name a call site uses for a log/slog function or method.
 type entrypoint string
 
-// leadingArgs maps each log/slog entrypoint whose trailing arguments are loose
-// key/value pairs to the number of arguments preceding them. LogAttrs is absent on
-// purpose — its trailing arguments are all slog.Attr, so it has no loose pairs.
+// leadingArgs maps each log/slog entrypoint whose trailing arguments this analyzer
+// walks to the number of arguments preceding them. Most carry loose key/value
+// pairs; LogAttrs and GroupAttrs carry only slog.Attr, and they are here all the
+// same, because an Attr WRITTEN in an argument list is judged wherever that list
+// is — leaving them out made every key inside them free.
 var leadingArgs = map[entrypoint]int{
 	"Debug":        1,
 	"Info":         1,
@@ -120,6 +126,8 @@ var leadingArgs = map[entrypoint]int{
 	"ErrorContext": 2,
 	"Log":          3,
 	"Group":        1,
+	"LogAttrs":     3,
+	"GroupAttrs":   1,
 }
 
 // Analyzer reports malformed key/value arguments to slog calls.

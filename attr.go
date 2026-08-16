@@ -16,12 +16,55 @@ type elementIndex int
 // a helper's return value — carries a key its own caller chose, written where this
 // call site does not reach.
 func checkWrittenAttrKey(pass *analysis.Pass, attr ast.Expr) {
-	switch written := ast.Unparen(attr).(type) {
+	switch written := writtenAttr(pass, attr).(type) {
 	case *ast.CallExpr:
 		checkConstructorKey(pass, written)
 	case *ast.CompositeLit:
 		checkLiteralKey(pass, written)
 	}
+}
+
+// writtenAttr peels the wrappers that NAME the same Attr value and returns the
+// expression that writes it: parentheses, an address-of that is immediately
+// dereferenced, a type assertion, and a conversion to slog.Attr. Each of those is
+// a spelling of its operand and none of them is a place a key was written, so
+// without this *&slog.Attr{k, v} is a TWO-character escape from a rule the
+// parenthesised spelling already costs five to evade.
+//
+// Peeling is written as a peel rather than as a set of exact matchers because an
+// over-eager unwrap costs nothing: the result is judged only when it IS a
+// constructor call or an Attr literal, so unwrapping too far lands on an
+// identifier and reports nothing.
+//
+// This is an ENUMERATION, and docs/s03.md says a negative universal is not closed
+// by one. The bound is deliberate: a spelling that names its operand is peeled, a
+// spelling that names something DERIVED from it is not — []slog.Attr{{k, v}}[0]
+// indexes a composite and a conditional selects between two, and both are silent.
+// slogkv.written-key-survives-its-spelling records that, and the honest expectation
+// is that a further spelling exists.
+func writtenAttr(pass *analysis.Pass, attr ast.Expr) ast.Expr {
+	switch wrapper := ast.Unparen(attr).(type) {
+	case *ast.StarExpr:
+		return writtenAttr(pass, wrapper.X)
+	case *ast.UnaryExpr:
+		return writtenAttr(pass, wrapper.X)
+	case *ast.TypeAssertExpr:
+		return writtenAttr(pass, wrapper.X)
+	case *ast.CallExpr:
+		return writtenAttrConversion(pass, wrapper)
+	}
+	return ast.Unparen(attr)
+}
+
+// writtenAttrConversion steps through slog.Attr(x), which names x, and leaves an
+// ordinary call — a constructor — standing, because that call IS where a key is
+// written. The callee of a conversion resolves to a type rather than to a function,
+// which is why checkConstructorKey walks past one without seeing it.
+func writtenAttrConversion(pass *analysis.Pass, call *ast.CallExpr) ast.Expr {
+	if !pass.TypesInfo.Types[call.Fun].IsType() {
+		return call
+	}
+	return writtenAttr(pass, call.Args[0])
 }
 
 // checkConstructorKey holds an Attr constructor's declared key parameter to the
